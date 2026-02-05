@@ -1,0 +1,1 @@
+gcc quicksort.c -o quicksort && ./quicksort quicksort.input quick.output

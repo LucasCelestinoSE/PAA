@@ -1,0 +1,12 @@
+1. Ler primeira linha do arquivo
+2. guardar inteiro em variavel chamada de quant_itens
+3. tamanho = quant_itens * 2;
+4. alocar matriz[quant_itens][alocar_mais_tarde] ( Linha x Coluna ) 
+4.1 - Criar lista contendo valores da saida
+# Loop (
+
+6. ler linha referente ao inteiro do tamanho da coluna da matriz.
+7. Alocar memoria para coluna da matriz.
+8. Ler dados.
+9. Colocar dados do vetor de inteiro na coluna da matriz. 
+# )
