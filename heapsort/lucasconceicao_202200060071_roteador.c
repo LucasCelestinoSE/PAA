@@ -8,12 +8,11 @@
 typedef struct {
     int prioridade;
     int tamanho;
-    char **conteudo_bytes;
-    int num_conteudo;
-} Pacote;
+    char **bytes;
+} No;
 
 typedef struct {
-    Pacote *dados;
+    No *dados;
     int tamanho;
     int capacidade;
 } VetorPacotes;
@@ -262,6 +261,16 @@ void main_logic(int argc, char *argv[]) {
 
     liberar_vetor(&lista_de_pacotes);
     fclose(arquivo_saida);
+}
+
+void imprimir_nos(No *vetor, int n) {
+    for (int i = 0; i < n; i++) {
+        printf("|");
+        for (int j = 0; j < vetor[i].tamanho; j++) {
+            printf("%s%s", vetor[i].bytes[j], (j < vetor[i].tamanho - 1) ? "," : "");
+        }
+        printf("|\n");
+    }
 }
 
 int main(int argc, char *argv[]) {
