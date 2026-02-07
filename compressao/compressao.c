@@ -1,8 +1,25 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <time.h>
+
+#define BUF_IN_SZ (1 << 20)
+#define HEX2BUF(c1, c2) ((hex_byte[(unsigned char)(c1)] << 4) | hex_byte[(unsigned char)(c2)])
+
+/* Tabela estática hex -> nibble (evita branches no hot path) */
+static unsigned char hex_byte[256];
+
+static void init_hex_table(void) {
+    static int inited;
+    if (inited) return;
+    inited = 1;
+    for (int i = '0'; i <= '9'; i++) hex_byte[i] = i - '0';
+    for (int i = 'A'; i <= 'F'; i++) hex_byte[i] = i - 'A' + 10;
+    for (int i = 'a'; i <= 'f'; i++) hex_byte[i] = i - 'a' + 10;
+}
 
 typedef struct sequencia {
     int tamanho;
@@ -29,9 +46,29 @@ typedef struct fila_p_min {
 fila_p_min *criar_fila_p_min() {
     fila_p_min *fpm = (fila_p_min*)malloc(sizeof(fila_p_min));
     fpm->tam = 0;
-    fpm->cap = 256;  // Capacidade inicial aumentada
+    fpm->cap = 512;
     fpm->V = (no**)malloc((fpm->cap + 1) * sizeof(no*));
     return fpm;
+}
+
+/* Heapify (descer): garante que a subárvore em i satisfaz a propriedade de heap mínimo. O(N) no build-heap. */
+static void heapify(fila_p_min *fpm, int i) {
+    while (2 * i <= fpm->tam) {
+        int m = 2 * i;
+        if (2 * i + 1 <= fpm->tam && fpm->V[2 * i + 1]->freq < fpm->V[2 * i]->freq)
+            m = 2 * i + 1;
+        if (fpm->V[i]->freq <= fpm->V[m]->freq) break;
+        no *aux = fpm->V[i];
+        fpm->V[i] = fpm->V[m];
+        fpm->V[m] = aux;
+        i = m;
+    }
+}
+
+/* Build-heap (heapify reverso): constrói o heap em tempo O(N) de baixo para cima. */
+static void build_heap(fila_p_min *fpm) {
+    for (int i = fpm->tam / 2; i >= 1; i--)
+        heapify(fpm, i);
 }
 
 void inserir(fila_p_min *fpm, int freq, char S, no *E, no *D) {
@@ -59,24 +96,25 @@ no *extrair_min(fila_p_min *fpm) {
     no *min = fpm->V[1];
     fpm->V[1] = fpm->V[fpm->tam];
     fpm->tam--;
-    int i = 1;
-    while (2 * i <= fpm->tam) {
-        int m = 2 * i;
-        if (2 * i + 1 <= fpm->tam && fpm->V[2 * i + 1]->freq < fpm->V[2 * i]->freq) m = 2 * i + 1;
-        if (fpm->V[i]->freq <= fpm->V[m]->freq) break;
-        no *aux = fpm->V[i];
-        fpm->V[i] = fpm->V[m];
-        fpm->V[m] = aux;
-        i = m;
-    }
+    heapify(fpm, 1);
     return min;
 }
 
 no *construir_arvore(int H[], int n) {
     fila_p_min *fpm = criar_fila_p_min();
+    /* Inserir todos os nós no vetor de uma vez (símbolos com frequência > 0). */
     for (int i = 0; i < n; i++) {
         if (H[i] > 0) {
-            inserir(fpm, H[i], (char)i, NULL, NULL);
+            if (fpm->tam + 1 >= fpm->cap) {
+                fpm->cap *= 2;
+                fpm->V = (no**)realloc(fpm->V, (fpm->cap + 1) * sizeof(no*));
+            }
+            no *novo = (no*)malloc(sizeof(no));
+            novo->freq = H[i];
+            novo->S = (char)i;
+            novo->E = NULL;
+            novo->D = NULL;
+            fpm->V[++fpm->tam] = novo;
         }
     }
     if (fpm->tam == 0) {
@@ -84,6 +122,8 @@ no *construir_arvore(int H[], int n) {
         free(fpm);
         return NULL;
     }
+    /* Construção do heap em tempo linear (heapify reverso / build-heap). */
+    build_heap(fpm);
     while (fpm->tam > 1) {
         no *x = extrair_min(fpm);
         no *y = extrair_min(fpm);
@@ -95,7 +135,7 @@ no *construir_arvore(int H[], int n) {
     return raiz;
 }
 
-void tabela_codigos_iter(no *raiz, char *T[]) {
+void tabela_codigos_iter(no *raiz, char *T[], int *T_len) {
     if (raiz == NULL) return;
 
     typedef struct {
@@ -117,11 +157,15 @@ void tabela_codigos_iter(no *raiz, char *T[]) {
         no *node = current.node;
 
         if (node->E == NULL && node->D == NULL) {
+            int idx = (unsigned char)node->S;
             if (current.depth == 0) {
-                strcpy(T[(unsigned char)node->S], "0");
+                T[idx][0] = '0';
+                T[idx][1] = '\0';
+                T_len[idx] = 1;
             } else {
-                strncpy(T[(unsigned char)node->S], current.path, current.depth);
-                T[(unsigned char)node->S][current.depth] = '\0';
+                memcpy(T[idx], current.path, current.depth);
+                T[idx][current.depth] = '\0';
+                T_len[idx] = current.depth;
             }
         } else {
             if (node->D) {
@@ -152,41 +196,11 @@ void liberar_arvore(no *raiz) {
 }
 
 
-// 2. Buffer único para códigos
 char* HUF(char **strings, int t) {
-    uint8_t *bytes = (uint8_t*)malloc(t * sizeof(uint8_t));
-    // Pré-processamento otimizado
-    for (int i = 0; i < t; i++) {
-        char c1 = strings[i][0];
-        char c2 = strings[i][1];
-        int val1, val2;
-
-        // Converter primeiro caractere
-        if (c1 >= '0' && c1 <= '9') {
-            val1 = c1 - '0';
-        } else if (c1 >= 'A' && c1 <= 'F') {
-            val1 = c1 - 'A' + 10;
-        } else if (c1 >= 'a' && c1 <= 'f') {
-            val1 = c1 - 'a' + 10;
-        } else {
-            // Tratar erro, se necessário
-            val1 = 0;
-        }
-
-        // Converter segundo caractere
-        if (c2 >= '0' && c2 <= '9') {
-            val2 = c2 - '0';
-        } else if (c2 >= 'A' && c2 <= 'F') {
-            val2 = c2 - 'A' + 10;
-        } else if (c2 >= 'a' && c2 <= 'f') {
-            val2 = c2 - 'a' + 10;
-        } else {
-            // Tratar erro, se necessário
-            val2 = 0;
-        }
-
-        bytes[i] = (uint8_t)((val1 << 4) | val2);
-    }
+    init_hex_table();
+    uint8_t *bytes = (uint8_t*)malloc((size_t)t * sizeof(uint8_t));
+    for (int i = 0; i < t; i++)
+        bytes[i] = HEX2BUF(strings[i][0], strings[i][1]);
 
     int histograma[256] = {0};
     for (int i = 0; i < t; i++) histograma[bytes[i]]++;
@@ -197,24 +211,22 @@ char* HUF(char **strings, int t) {
         return NULL;
     }
 
-    // Buffer único para todos os códigos
     char *codigos = (char*)calloc(256 * 256, sizeof(char));
+    int T_len[256];
+    memset(T_len, 0, sizeof(T_len));
     char *T[256];
     for (int i = 0; i < 256; i++) T[i] = &codigos[i * 256];
 
-    tabela_codigos_iter(arvore, T);
+    tabela_codigos_iter(arvore, T, T_len);
 
-    // Cálculo de tamanho
     size_t total_len = 0;
-    for (int i = 0; i < t; i++) total_len += strlen(T[bytes[i]]);
+    for (int i = 0; i < t; i++) total_len += (size_t)T_len[bytes[i]];
 
     char *saida = (char*)malloc(total_len + 1);
     char *ptr = saida;
-
     for (int i = 0; i < t; i++) {
-        char *code = T[bytes[i]];
-        size_t len = strlen(code);
-        memcpy(ptr, code, len);
+        int len = T_len[bytes[i]];
+        memcpy(ptr, T[bytes[i]], (size_t)len);
         ptr += len;
     }
     *ptr = '\0';
@@ -280,20 +292,21 @@ void corrige_HUF(char **HUF) {
 char* runLengthEncongind(char **strings, int t) {
     if (t == 0) return strdup("");
 
-    char *saida = (char*)malloc(t * 4 + 1);
+    char *saida = (char*)malloc((size_t)t * 4 + 1);
     int index = 0;
     int count = 1;
-    char *current = strings[0];
+    char c0 = strings[0][0], c1 = strings[0][1];
 
     for (int i = 1; i <= t; i++) {
-        if (i == t || strcmp(strings[i], current) != 0 || count == 255) {
-            // Conversão direta do count para hex
+        if (i == t || (strings[i][0] != c0 || strings[i][1] != c1) || count == 255) {
             saida[index++] = hex_table[(count >> 4) & 0xF];
             saida[index++] = hex_table[count & 0xF];
-            saida[index++] = current[0];
-            saida[index++] = current[1];
-            
-            if (i < t) current = strings[i];
+            saida[index++] = c0;
+            saida[index++] = c1;
+            if (i < t) {
+                c0 = strings[i][0];
+                c1 = strings[i][1];
+            }
             count = 1;
         } else {
             count++;
@@ -303,121 +316,106 @@ char* runLengthEncongind(char **strings, int t) {
     return saida;
 }
 
+/* Parser de entrada: lê inteiro e avança p */
+static int parse_int(char **p) {
+    char *s = *p;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    int v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    *p = s;
+    return v;
+}
+
+/* Avança p até passar de 2 chars hex e copia esses 2 chars para dest. */
+static void parse_hex2_preserve(char **p, char *dest) {
+    char *s = *p;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    dest[0] = s[0];
+    dest[1] = s[1];
+    dest[2] = '\0';
+    *p = s + 2;
+}
+
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Uso: %s <arquivo_entrada> <arquivo_saida>\n", argv[0]);
-        return 1;
-    }
+    clock_t inicio, fim;
+    double tempo_gasto;
+    inicio = clock();
+    if (argc < 3) return 1;
 
     FILE* input = fopen(argv[1], "r");
-    if (!input) {
-        perror("Erro ao abrir o arquivo de entrada");
-        return 1;
-    }
+    if (!input) return 1;
+
+    fseek(input, 0, SEEK_END);
+    long fsize = ftell(input);
+    fseek(input, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > (long)(50 << 20)) { fclose(input); return 1; }
+    size_t size = (size_t)fsize;
+    char *buf = (char*)malloc(size + 1);
+    if (!buf) { fclose(input); return 1; }
+    size_t nread = fread(buf, 1, size, input);
+    fclose(input);
+    buf[nread] = '\0';
+
+    init_hex_table();
 
     FILE* output = fopen(argv[2], "w");
-    if (!output) {
-        perror("Erro ao abrir o arquivo de saída");
-        fclose(input);
-        return 1;
-    }
+    if (!output) { free(buf); return 1; }
+    setvbuf(output, NULL, _IOFBF, 256 * 1024);
 
-    int quantidade_sequencias;
-    if (fscanf(input, "%d", &quantidade_sequencias) != 1) {
-        fprintf(stderr, "Erro ao ler a quantidade de sequências\n");
-        fclose(input);
-        fclose(output);
-        return 1;
-    }
+    char *p = buf;
+    int quantidade_sequencias = parse_int(&p);
 
     for (int i = 0; i < quantidade_sequencias; i++) {
         sequencia Sequencia;
-        if (fscanf(input, "%d", &Sequencia.tamanho) != 1) {
-            fprintf(stderr, "Erro ao ler o tamanho da sequência %d\n", i);
-            fclose(input);
-            fclose(output);
-            return 1;
-        }
+        Sequencia.tamanho = parse_int(&p);
 
-        Sequencia.conteudo = (char**)malloc(Sequencia.tamanho * sizeof(char*));
-        if (!Sequencia.conteudo) {
-            perror("Erro ao alocar memória para o conteúdo da sequência");
-            fclose(input);
-            fclose(output);
-            return 1;
-        }
-
+        /* Buffer único: todos os tokens em um bloco contíguo */
+        char *block = (char*)malloc((size_t)Sequencia.tamanho * 3);
+        if (!block) { free(buf); fclose(output); return 1; }
+        Sequencia.conteudo = (char**)malloc((size_t)Sequencia.tamanho * sizeof(char*));
+        if (!Sequencia.conteudo) { free(block); free(buf); fclose(output); return 1; }
         for (int j = 0; j < Sequencia.tamanho; j++) {
-            Sequencia.conteudo[j] = (char*)malloc(3 * sizeof(char));
-            if (!Sequencia.conteudo[j]) {
-                perror("Erro ao alocar memória para o conteúdo da sequência");
-                for (int k = 0; k < j; k++) {
-                    free(Sequencia.conteudo[k]);
-                }
-                free(Sequencia.conteudo);
-                fclose(input);
-                fclose(output);
-                return 1;
-            }
-            if (fscanf(input, "%2s", Sequencia.conteudo[j]) != 1) {
-                fprintf(stderr, "Erro ao ler o conteúdo da sequência %d\n", i);
-                for (int k = 0; k <= j; k++) {
-                    free(Sequencia.conteudo[k]);
-                }
-                free(Sequencia.conteudo);
-                fclose(input);
-                fclose(output);
-                return 1;
-            }
+            Sequencia.conteudo[j] = block + j * 3;
+            parse_hex2_preserve(&p, Sequencia.conteudo[j]);
         }
 
         Sequencia.conteudo_comprimido_HUFF = HUF(Sequencia.conteudo, Sequencia.tamanho);
-        if (!Sequencia.conteudo_comprimido_HUFF) {
-            fprintf(stderr, "Erro ao comprimir usando HUF\n");
-            for (int j = 0; j < Sequencia.tamanho; j++) {
-                free(Sequencia.conteudo[j]);
-            }
-            free(Sequencia.conteudo);
-            fclose(input);
-            fclose(output);
-            return 1;
-        }
         corrige_HUF(&Sequencia.conteudo_comprimido_HUFF);
-
         Sequencia.conteudo_comprimido_RLE = runLengthEncongind(Sequencia.conteudo, Sequencia.tamanho);
-        if (!Sequencia.conteudo_comprimido_RLE) {
-            fprintf(stderr, "Erro ao comprimir usando RLE\n");
-            for (int j = 0; j < Sequencia.tamanho; j++) {
-                free(Sequencia.conteudo[j]);
-            }
-            free(Sequencia.conteudo);
-            free(Sequencia.conteudo_comprimido_HUFF);
-            fclose(input);
-            fclose(output);
-            return 1;
-        }
 
-        Sequencia.percentual_HUFF = ((float)strlen(Sequencia.conteudo_comprimido_HUFF) / (float) (2 * Sequencia.tamanho)) * 100;
-        Sequencia.percentual_RLE = ((float)strlen(Sequencia.conteudo_comprimido_RLE) / (float) (2 * Sequencia.tamanho)) * 100;
+        size_t len_h = strlen(Sequencia.conteudo_comprimido_HUFF);
+        size_t len_r = strlen(Sequencia.conteudo_comprimido_RLE);
+        int den = 2 * Sequencia.tamanho;
+        Sequencia.percentual_HUFF = (float)len_h * 100.f / (float)den;
+        Sequencia.percentual_RLE  = (float)len_r * 100.f / (float)den;
 
+        /* Gabarito não tem newline após a última linha; imprimir \n antes de cada linha exceto a primeira. */
+        int first_line = (i == 0);
         if (Sequencia.percentual_HUFF < Sequencia.percentual_RLE) {
-            fprintf(output, "%d->HUF(%.2f%%)=%s\n", i, Sequencia.percentual_HUFF, Sequencia.conteudo_comprimido_HUFF);
+            if (!first_line) fputc('\n', output);
+            fprintf(output, "%d->HUF(%.2f%%)=%s", i, Sequencia.percentual_HUFF, Sequencia.conteudo_comprimido_HUFF);
+            first_line = 0;
         } else if (Sequencia.percentual_HUFF > Sequencia.percentual_RLE) {
-            fprintf(output, "%d->RLE(%.2f%%)=%s\n", i, Sequencia.percentual_RLE, Sequencia.conteudo_comprimido_RLE);
+            if (!first_line) fputc('\n', output);
+            fprintf(output, "%d->RLE(%.2f%%)=%s", i, Sequencia.percentual_RLE, Sequencia.conteudo_comprimido_RLE);
+            first_line = 0;
         } else {
-            fprintf(output, "%d->HUF(%.2f%%)=%s\n", i, Sequencia.percentual_HUFF, Sequencia.conteudo_comprimido_HUFF);
-            fprintf(output, "%d->RLE(%.2f%%)=%s\n", i, Sequencia.percentual_RLE, Sequencia.conteudo_comprimido_RLE);
+            if (!first_line) fputc('\n', output);
+            fprintf(output, "%d->HUF(%.2f%%)=%s\n%d->RLE(%.2f%%)=%s", i, Sequencia.percentual_HUFF, Sequencia.conteudo_comprimido_HUFF, i, Sequencia.percentual_RLE, Sequencia.conteudo_comprimido_RLE);
+            first_line = 0;
         }
 
-        for (int j = 0; j < Sequencia.tamanho; j++) {
-            free(Sequencia.conteudo[j]);
-        }
+        free(block);
         free(Sequencia.conteudo);
         free(Sequencia.conteudo_comprimido_HUFF);
         free(Sequencia.conteudo_comprimido_RLE);
     }
 
-    fclose(input);
+    free(buf);
     fclose(output);
+    fim = clock();
+    tempo_gasto = (double)(fim - inicio) / CLOCKS_PER_SEC;
+    printf("Tempo de execucao: %f segundos\n", tempo_gasto);
+    printf("Saída escrita em: %s\n", argv[2]);
     return 0;
 }
