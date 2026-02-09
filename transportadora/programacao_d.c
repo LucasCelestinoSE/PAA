@@ -2,317 +2,213 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <time.h>
 
-int FULL_PLC = 8
-int FULL_CODE = 14
-
-// ============================================================================
-// ESTRUTURAS DE DADOS
-// ============================================================================
+#define TAM_PLACA   8
+#define TAM_CODIGO 14
 
 typedef struct {
-    char placa[FULL_PLC];
+    char id[TAM_PLACA];
+    int32_t peso_max;
+    int32_t vol_max;
+} Veiculo;
+
+typedef struct {
+    char cod[TAM_CODIGO];
+    float val;
     int32_t peso;
-    int32_t volume;
-} Carro;
+    int32_t vol;
+    int ja_utilizado;
+    int indice_original;
+} Item;
 
-typedef struct {
-    char codigo[FULL_CODE];
-    float valor;
-    int32_t peso;
-    int32_t volume;
-    int usado;
-    int posicao_original;
-} Produto;
-
-// ============================================================================
-// PADRÃO STRATEGY - Interface para algoritmos de otimização
-// ============================================================================
-
-// Definição da função strategy
-typedef void (*EstrategiaOtimizacao)(Carro, Produto*, int32_t, FILE*, int32_t*, Produto*);
-
-// Estrutura que encapsula a estratégia
-typedef struct {
-    const char *nome;
-    EstrategiaOtimizacao executar;
-} Strategy;
-
-// ============================================================================
-// ESTRATÉGIA 1: Programação Dinâmica (3D Knapsack)
-// ============================================================================
-
-float maximo(float a, float b) {
-    return (a > b) ? a : b;
+static inline float maior_entre(float x, float y) {
+    return x >= y ? x : y;
 }
 
-void preencherTabelaDP(float ***dp, Carro carro, Produto *produtos, int32_t n) {
-    for (int i = 0; i <= n; i++) {
-        for (int j = 0; j <= carro.volume; j++) {
-            for (int k = 0; k <= carro.peso; k++) {
-                if (i == 0 || j == 0 || k == 0) {
-                    dp[i][j][k] = 0;
-                } else if (produtos[i - 1].volume <= j && produtos[i - 1].peso <= k && !produtos[i - 1].usado) {
-                    dp[i][j][k] = maximo(
-                        produtos[i - 1].valor + dp[i - 1][j - produtos[i - 1].volume][k - produtos[i - 1].peso],
-                        dp[i - 1][j][k]
-                    );
-                } else {
-                    dp[i][j][k] = dp[i - 1][j][k];
+static void montar_matriz(float ***m, Veiculo v, Item *itens, int32_t num_itens) {
+    int32_t vol_lim = v.vol_max;
+    int32_t peso_lim = v.peso_max;
+
+    for (int idx = 0; idx <= num_itens; idx++) {
+        for (int j = 0; j <= vol_lim; j++) {
+            for (int k = 0; k <= peso_lim; k++) {
+                if (idx == 0 || j == 0 || k == 0) {
+                    m[idx][j][k] = 0.0f;
+                    continue;
                 }
+                Item *cur = &itens[idx - 1];
+                if (cur->vol > j || cur->peso > k || cur->ja_utilizado) {
+                    m[idx][j][k] = m[idx - 1][j][k];
+                    continue;
+                }
+                float com_item = cur->val + m[idx - 1][j - cur->vol][k - cur->peso];
+                float sem_item = m[idx - 1][j][k];
+                m[idx][j][k] = maior_entre(com_item, sem_item);
             }
         }
     }
 }
 
-void selecionarProdutosDP(float ***dp, Carro carro, Produto *produtosAux, int32_t n, FILE *output, int32_t *quantidade, Produto *produtosOriginal) {
-    int pesoTotal = 0, volumeTotal = 0;
-    char *selecionados[n];
-    int count = 0;
+static void recuperar_escolhas(float ***m, Veiculo v, Item *itens_aux, int32_t n,
+                              FILE *out, int32_t *qtd, Item *itens_orig) {
+    int peso_acum = 0, vol_acum = 0;
+    char *codigos_escolhidos[n];
+    int num_escolhidos = 0;
 
-    for (int i = n, j = carro.volume, k = carro.peso; i > 0 && j > 0 && k > 0; i--) {
-        if (dp[i][j][k] != dp[i - 1][j][k]) {
-            selecionados[count++] = produtosAux[i - 1].codigo;
-            pesoTotal += produtosAux[i - 1].peso;
-            volumeTotal += produtosAux[i - 1].volume;
-            produtosOriginal[produtosAux[i - 1].posicao_original].usado = 1;
-            j -= produtosAux[i - 1].volume;
-            k -= produtosAux[i - 1].peso;
-            (*quantidade)++;
+    int idx = n;
+    int j = v.vol_max;
+    int k = v.peso_max;
+
+    while (idx > 0 && j > 0 && k > 0) {
+        if (m[idx][j][k] != m[idx - 1][j][k]) {
+            Item *cur = &itens_aux[idx - 1];
+            codigos_escolhidos[num_escolhidos++] = cur->cod;
+            peso_acum += cur->peso;
+            vol_acum += cur->vol;
+            itens_orig[cur->indice_original].ja_utilizado = 1;
+            j -= cur->vol;
+            k -= cur->peso;
+            (*qtd)++;
         }
+        idx--;
     }
 
-    fprintf(output, "[%s]R$%.2f,%dKG(%d%%),%dL(%d%%)->", carro.placa, dp[n][carro.volume][carro.peso],
-            pesoTotal, (int)((float) pesoTotal / carro.peso * 100 + 0.5),
-            volumeTotal, (int)((float) volumeTotal / carro.volume * 100 + 0.5));
-    
-    for (int x = count - 1; x >= 0; x--) {
-        fprintf(output, "%s%s", selecionados[x], (x > 0) ? "," : "\n");
+    float valor_final = m[n][v.vol_max][v.peso_max];
+    float pct_peso = (float)peso_acum / (float)v.peso_max * 100.0f;
+    float pct_vol = (float)vol_acum / (float)v.vol_max * 100.0f;
+
+    fprintf(out, "[%s]R$%.2f,%dKG(%.0f%%),%dL(%.0f%%)->",
+            v.id, valor_final, peso_acum, pct_peso, vol_acum, pct_vol);
+
+    for (int x = num_escolhidos - 1; x >= 0; x--) {
+        fprintf(out, "%s%s", codigos_escolhidos[x], x > 0 ? "," : "\n");
     }
 }
 
-void estrategiaDP(Carro carro, Produto *produtos, int32_t p, FILE *output, int32_t *quantidade, Produto *produtosOriginal) {
-    // Filtra produtos não usados
-    int n_aux = 0;
-    for (int j = 0; j < p; j++) {
-        if (!produtos[j].usado) n_aux++;
-    }
-    
-    Produto *produtosAux = malloc(n_aux * sizeof(Produto));
-    int idx = 0;
-    for (int j = 0; j < p; j++) {
-        if (!produtos[j].usado) {
-            produtosAux[idx++] = produtos[j];
-        }
-    }
-
-    // Aloca tabela DP
-    float ***dp = malloc((n_aux + 1) * sizeof(float **));
-    for (int i = 0; i <= n_aux; i++) {
-        dp[i] = malloc((carro.volume + 1) * sizeof(float *));
-        for (int j = 0; j <= carro.volume; j++) {
-            dp[i][j] = malloc((carro.peso + 1) * sizeof(float));
-            memset(dp[i][j], 0, (carro.peso + 1) * sizeof(float));
-        }
-    }
-
-    preencherTabelaDP(dp, carro, produtosAux, n_aux);
-    selecionarProdutosDP(dp, carro, produtosAux, n_aux, output, quantidade, produtosOriginal);
-
-    // Libera memória
-    for (int i = 0; i <= n_aux; i++) {
-        for (int j = 0; j <= carro.volume; j++) {
-            free(dp[i][j]);
-        }
-        free(dp[i]);
-    }
-    free(dp);
-    free(produtosAux);
+static int32_t achar_maior_peso(Veiculo *veiculos, int num_veiculos) {
+    int32_t m = 0;
+    for (int i = 0; i < num_veiculos; i++)
+        if (veiculos[i].peso_max > m) m = veiculos[i].peso_max;
+    return m;
 }
 
-// ============================================================================
-// ESTRATÉGIA 2: Greedy (Ganancioso) - por valor/peso
-// ============================================================================
-
-int compararPorValorPeso(const void *a, const void *b) {
-    Produto *p1 = (Produto *)a;
-    Produto *p2 = (Produto *)b;
-    float razao1 = p1->valor / (p1->peso + p1->volume);
-    float razao2 = p2->valor / (p2->peso + p2->volume);
-    return (razao2 > razao1) ? 1 : -1;
+static int32_t achar_maior_volume(Veiculo *veiculos, int num_veiculos) {
+    int32_t m = 0;
+    for (int i = 0; i < num_veiculos; i++)
+        if (veiculos[i].vol_max > m) m = veiculos[i].vol_max;
+    return m;
 }
 
-void estrategiaGreedy(Carro carro, Produto *produtos, int32_t p, FILE *output, int32_t *quantidade, Produto *produtosOriginal) {
-    int n_aux = 0;
-    for (int j = 0; j < p; j++) {
-        if (!produtos[j].usado) n_aux++;
+static float ***alocar_matriz(int linhas, int cols_vol, int cols_peso) {
+    float ***m = (float ***)malloc((size_t)(linhas + 1) * sizeof(float **));
+    for (int i = 0; i <= linhas; i++) {
+        m[i] = (float **)malloc((size_t)(cols_vol + 1) * sizeof(float *));
+        for (int j = 0; j <= cols_vol; j++)
+            m[i][j] = (float *)malloc((size_t)(cols_peso + 1) * sizeof(float));
     }
-    
-    Produto *produtosAux = malloc(n_aux * sizeof(Produto));
-    int idx = 0;
-    for (int j = 0; j < p; j++) {
-        if (!produtos[j].usado) {
-            produtosAux[idx++] = produtos[j];
-        }
-    }
-
-    qsort(produtosAux, n_aux, sizeof(Produto), compararPorValorPeso);
-
-    float valorTotal = 0;
-    int pesoTotal = 0, volumeTotal = 0;
-    char *selecionados[n_aux];
-    int count = 0;
-
-    for (int i = 0; i < n_aux; i++) {
-        if (pesoTotal + produtosAux[i].peso <= carro.peso && 
-            volumeTotal + produtosAux[i].volume <= carro.volume) {
-            selecionados[count++] = produtosAux[i].codigo;
-            valorTotal += produtosAux[i].valor;
-            pesoTotal += produtosAux[i].peso;
-            volumeTotal += produtosAux[i].volume;
-            produtosOriginal[produtosAux[i].posicao_original].usado = 1;
-            (*quantidade)++;
-        }
-    }
-
-    fprintf(output, "[%s]R$%.2f,%dKG(%d%%),%dL(%d%%)->", carro.placa, valorTotal,
-            pesoTotal, (int)((float) pesoTotal / carro.peso * 100 + 0.5),
-            volumeTotal, (int)((float) volumeTotal / carro.volume * 100 + 0.5));
-    
-    for (int x = 0; x < count; x++) {
-        fprintf(output, "%s%s", selecionados[x], (x < count - 1) ? "," : "\n");
-    }
-
-    free(produtosAux);
+    return m;
 }
 
-// ============================================================================
-// PROCESSAMENTO COM STRATEGY PATTERN
-// ============================================================================
-
-void processarCarrosComStrategy(Carro *carros, Produto *produtos, int32_t c, int32_t p, FILE *output, Strategy estrategia) {
-    int quantidade = 0;
-    
-    printf("📊 Executando estratégia: %s\n", estrategia.nome);
-    
-    for (int i = 0; i < c; i++) {
-        estrategia.executar(carros[i], produtos, p, output, &quantidade, produtos);
+static void liberar_matriz(float ***m, int linhas, int cols_vol) {
+    for (int i = 0; i <= linhas; i++) {
+        for (int j = 0; j <= cols_vol; j++)
+            free(m[i][j]);
+        free(m[i]);
     }
+    free(m);
 }
 
-// ============================================================================
-// FUNÇÕES AUXILIARES
-// ============================================================================
+static void otimizar_carregamento(Veiculo *veiculos, Item *itens, int num_veiculos,
+                                  int num_itens, FILE *out) {
+    int32_t peso_max = achar_maior_peso(veiculos, num_veiculos);
+    int32_t vol_max = achar_maior_volume(veiculos, num_veiculos);
 
-void calcularPendentes(Produto *produtos, int32_t p, FILE *output) {
-    float valorPendente = 0;
-    int pesoPendente = 0, volumePendente = 0;
-    
-    fprintf(output, "PENDENTE:");
-    
-    for (int i = 0; i < p; i++) {
-        if (!produtos[i].usado) {
-            valorPendente += produtos[i].valor;
-            pesoPendente += produtos[i].peso;
-            volumePendente += produtos[i].volume;
+    float ***mat = alocar_matriz(num_itens, vol_max, peso_max);
+    int32_t qtd_total = 0;
+
+    for (int v = 0; v < num_veiculos; v++) {
+        int n_aux = 0;
+        for (int i = 0; i < num_itens; i++)
+            if (!itens[i].ja_utilizado) n_aux++;
+
+        Item *aux = (Item *)malloc((size_t)n_aux * sizeof(Item));
+        int pos = 0;
+        for (int i = 0; i < num_itens; i++) {
+            if (!itens[i].ja_utilizado)
+                aux[pos++] = itens[i];
         }
+
+        montar_matriz(mat, veiculos[v], aux, n_aux);
+        recuperar_escolhas(mat, veiculos[v], aux, n_aux, out, &qtd_total, itens);
+        free(aux);
     }
-    
-    fprintf(output, "R$%.2f,%dKG,%dL->", valorPendente, pesoPendente, volumePendente);
+
+    liberar_matriz(mat, num_itens, vol_max);
+}
+
+static void escrever_pendentes(Item *itens, int num_itens, FILE *out) {
+    float val_total = 0.0f;
+    int32_t peso_total = 0, vol_total = 0;
+
+    for (int i = 0; i < num_itens; i++) {
+        if (itens[i].ja_utilizado) continue;
+        val_total += itens[i].val;
+        peso_total += itens[i].peso;
+        vol_total += itens[i].vol;
+    }
+
+    fprintf(out, "PENDENTE:R$%.2f,%dKG,%dL->", val_total, peso_total, vol_total);
+
     int primeiro = 1;
-    for (int i = 0; i < p; i++) {
-        if (!produtos[i].usado) {
-            if (!primeiro) fprintf(output, ",");
-            fprintf(output, "%s", produtos[i].codigo);
+    for (int i = 0; i < num_itens; i++) {
+        if (!itens[i].ja_utilizado) {
+            if (!primeiro) fputc(',', out);
+            fprintf(out, "%s", itens[i].cod);
             primeiro = 0;
         }
     }
-    fprintf(output, "\n");
+    fputc('\n', out);
 }
-
-double medirTempoExecucao(clock_t inicio, clock_t fim) {
-    return ((double)(fim - inicio) / CLOCKS_PER_SEC) * 1000.0;
-}
-
-// ============================================================================
-// FUNÇÃO PRINCIPAL
-// ============================================================================
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Uso: %s <arquivo_entrada> <arquivo_saida> [estrategia]\n", argv[0]);
-        printf("Estratégias disponíveis: dp, greedy\n");
+        fprintf(stderr, "Uso: %s <arquivo_entrada> <arquivo_saida>\n", argv[0]);
         return 1;
     }
 
-    // Define estratégias disponíveis
-    Strategy estrategias[] = {
-        {"Programação Dinâmica (3D Knapsack)", estrategiaDP},
-        {"Ganancioso (Greedy)", estrategiaGreedy}
-    };
-
-    // Padrão: DP
-    Strategy estrategiaEscolhida = estrategias[0];
-
-    // Se houver argumento, valida
-    if (argc >= 4) {
-        if (strcmp(argv[3], "greedy") == 0) {
-            estrategiaEscolhida = estrategias[1];
-        } else if (strcmp(argv[3], "dp") != 0) {
-            printf("❌ Estratégia desconhecida: %s\n", argv[3]);
-            return 1;
-        }
-    }
-
-    // Abre arquivos
-    FILE *input = fopen(argv[1], "r");
-    if (!input) {
-        perror("Erro ao abrir arquivo de entrada");
+    FILE *entrada = fopen(argv[1], "r");
+    if (!entrada) {
+        perror("Erro ao abrir o arquivo de entrada");
         return 1;
     }
 
-    FILE *output = fopen(argv[2], "w");
-    if (!output) {
-        perror("Erro ao abrir arquivo de saída");
-        fclose(input);
+    FILE *saida = fopen(argv[2], "w");
+    if (!saida) {
+        perror("Erro ao abrir o arquivo de saída");
+        fclose(entrada);
         return 1;
     }
 
-    // Lê dados
     int c, p;
-    fscanf(input, "%d", &c);
-    Carro *carros = malloc(c * sizeof(Carro));
-    for (int i = 0; i < c; i++) {
-        fscanf(input, "%s %d %d", carros[i].placa, &carros[i].peso, &carros[i].volume);
-    }
+    fscanf(entrada, "%d", &c);
+    Veiculo *veiculos = (Veiculo *)malloc((size_t)c * sizeof(Veiculo));
+    for (int i = 0; i < c; i++)
+        fscanf(entrada, "%s %d %d", veiculos[i].id, &veiculos[i].peso_max, &veiculos[i].vol_max);
 
-    fscanf(input, "%d", &p);
-    Produto *produtos = malloc(p * sizeof(Produto));
+    fscanf(entrada, "%d", &p);
+    Item *itens = (Item *)malloc((size_t)p * sizeof(Item));
     for (int i = 0; i < p; i++) {
-        fscanf(input, "%s %f %d %d", produtos[i].codigo, &produtos[i].valor, &produtos[i].peso, &produtos[i].volume);
-        produtos[i].usado = 0;
-        produtos[i].posicao_original = i;
+        fscanf(entrada, "%s %f %d %d", itens[i].cod, &itens[i].val, &itens[i].peso, &itens[i].vol);
+        itens[i].ja_utilizado = 0;
+        itens[i].indice_original = i;
     }
 
-    // Processa com medição de tempo
-    clock_t inicio = clock();
-    
-    processarCarrosComStrategy(carros, produtos, c, p, output, estrategiaEscolhida);
-    calcularPendentes(produtos, p, output);
-    
-    clock_t fim = clock();
-    double tempo = medirTempoExecucao(inicio, fim);
+    otimizar_carregamento(veiculos, itens, c, p, saida);
+    escrever_pendentes(itens, p, saida);
 
-    // Exibe resultado
-    printf("✅ Processamento concluído\n");
-    printf("⏱️  Tempo: %.2f ms\n", tempo);
-
-    // Libera memória
-    free(carros);
-    free(produtos);
-    fclose(input);
-    fclose(output);
-
+    free(veiculos);
+    free(itens);
+    fclose(entrada);
+    fclose(saida);
     return 0;
 }

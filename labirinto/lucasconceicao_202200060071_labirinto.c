@@ -1,11 +1,12 @@
-// Compilar com: gcc -Wall -O3 lucasconceicao_202200060071.c -o labirinto
+// Compilar com: gcc -Wall -O3 Main.c -o Main
+// Uso: ./Main input output
 
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-int TAM = 100
+#define TAMANHO 100
 
 typedef struct {
     int x, y;
@@ -17,8 +18,8 @@ typedef struct No {
     struct No *next;
 } No;
 
-int vis[TAM][TAM];
-char grid[TAM][TAM];
+int vis[TAMANHO][TAMANHO];
+char grid[TAMANHO][TAMANHO];
 int w, h;
 Pos start;
 Pos end;
@@ -28,8 +29,6 @@ int found = 0;
 int mx[] = {0, -1, 0, 1};
 int my[] = {1, 0, -1, 0};
 char* moves[] = {"D", "F", "E", "T"};
-
-void reverse_path();
 
 void print_path(FILE* out, int id) {
     fprintf(out, "L%d:INI@%d,%d", id, start.x, start.y);
